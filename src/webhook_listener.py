@@ -1,63 +1,56 @@
 """
 webhook_listener.py
--------------------
-FastAPI webhook listener that receives LIMS events and triggers SAP integration.
-Compliant with FDA 21 CFR Part 11 audit trail requirements.
+
+FastAPI service that receives LIMS result events, transforms them, posts them
+to SAP, and writes every step to a hash-chained audit log.
+
+Run locally (mock SAP):
+    uvicorn webhook_listener:app --app-dir src --port 8000
 """
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
 import logging
-import json
-from datetime import datetime
 
-from data_transformer import transform_lims_to_sap
-from sap_api_client import SAPApiClient
+from fastapi import FastAPI, Header, HTTPException, Request
+
 from audit_logger import log_event
 from config import settings
+from data_transformer import TransformError, transform_lims_to_sap
+from sap_api_client import SAPApiClient
 
-app = FastAPI(title="LIMS-SAP Integration Webhook Listener")
-logger = logging.getLogger(__name__)
-sap_client = SAPApiClient(base_url=settings.SAP_BASE_URL, api_key=settings.SAP_API_KEY)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+logger = logging.getLogger("lims-sap")
+
+app = FastAPI(title="LIMS to SAP Integration")
+sap_client = SAPApiClient(settings.SAP_BASE_URL, settings.SAP_API_KEY, settings.SAP_MODE)
 
 
-@app.post("/webhook/lims-event")
-async def receive_lims_event(request: Request):
-      """
-          Receives incoming webhook events from LIMS.
-              Validates payload, transforms data, and pushes to SAP ERP.
-                  """
-      try:
-                payload = await request.json()
-                event_type = payload.get("event_type")
-                sample_id = payload.get("sample_id")
+@app.post("/webhook/lims-result")
+async def receive_lims_result(request: Request, x_webhook_secret: str = Header(default="")):
+    if settings.WEBHOOK_SECRET and x_webhook_secret != settings.WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="invalid webhook secret")
 
-          logger.info(f"[{datetime.utcnow()}] Received LIMS event: {event_type} for sample {sample_id}")
-        log_event(event_type="WEBHOOK_RECEIVED", sample_id=sample_id, payload=payload)
+    event = await request.json()
+    sample_id = event.get("sample_id")
+    audit = settings.AUDIT_LOG_PATH
+    log_event(audit, "WEBHOOK_RECEIVED", sample_id, payload=event)
 
-        # Transform LIMS payload to SAP schema
-        sap_payload = transform_lims_to_sap(payload)
+    try:
+        record = transform_lims_to_sap(event)
+    except TransformError as exc:
+        log_event(audit, "TRANSFORM_REJECTED", sample_id, reason=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc))
 
-        # Push to SAP
-        response = sap_client.post_inspection_result(sap_payload)
+    try:
+        response = sap_client.post_inspection_result(record)
+    except Exception as exc:  # network or SAP-side failure
+        log_event(audit, "SAP_POST_FAILED", sample_id, error=str(exc))
+        raise HTTPException(status_code=502, detail="SAP post failed; event logged for retry")
 
-        log_event(event_type="SAP_PUSH_SUCCESS", sample_id=sample_id, response=response)
-        return JSONResponse({"status": "success", "sap_response": response}, status_code=200)
-
-except KeyError as e:
-        logger.error(f"Missing required field: {e}")
-        raise HTTPException(status_code=400, detail=f"Missing field: {e}")
-except Exception as e:
-        logger.error(f"Integration error: {e}")
-        log_event(event_type="INTEGRATION_ERROR", sample_id=None, error=str(e))
-        raise HTTPException(status_code=500, detail="Internal integration error")
+    log_event(audit, "SAP_POST_SUCCESS", sample_id, sap_record=record, sap_response=response)
+    logger.info("Posted %s to SAP lot %s", sample_id, record["InspectionLot"])
+    return {"status": "posted", "sap_record": record, "sap_response": response}
 
 
 @app.get("/health")
-async def health_check():
-      return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-
-if __name__ == "__main__":
-      import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+async def health():
+    return {"status": "ok", "sap_mode": settings.SAP_MODE}

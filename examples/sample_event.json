@@ -1,0 +1,11 @@
+{
+  "event_type": "RESULT_APPROVED",
+  "sample_id": "LOT-24117-A",
+  "inspection_lot": "040000012345",
+  "characteristic": "0010",
+  "test_result": 4.21,
+  "unit": "mg/mL",
+  "status": "APPROVED",
+  "analyst_id": "jdoe",
+  "test_date": "2026-03-02"
+}

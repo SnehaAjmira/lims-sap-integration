@@ -1,94 +1,72 @@
 """
-  data_transformer.py
-  -------------------
-  Maps LIMS payload fields to SAP ERP schema.
-  Handles unit conversions, status code mapping, and date formatting.
-    """
+data_transformer.py
 
-    from datetime import datetime
-    from typing import Dict, Any
+Maps a LIMS result event to an SAP QM inspection result record.
+Handles required-field checks, status mapping, unit conversion, and date formats.
+"""
 
-      # LIMS status to SAP verification status code mapping
-      STATUS_MAP = {
-          "APPROVED": "01",
-          "REJECTED": "02",
-          "PENDING": "03",
-          "IN_PROGRESS": "04",
-          "ON_HOLD": "05",
-    }
+from datetime import datetime
+from typing import Any, Dict
 
-# Unit conversion factors (LIMS unit -> SAP unit)
-  UNIT_CONVERSIONS = {
-      ("mg/L", "g/L"): 0.001,
-      ("ppm", "mg/L"): 1.0,
-      ("CFU/mL", "CFU/mL"): 1.0,
+REQUIRED_FIELDS = ("sample_id", "inspection_lot", "characteristic", "test_result",
+                   "unit", "status", "analyst_id", "test_date")
+
+# LIMS result status -> SAP valuation code (A = accepted, R = rejected)
+STATUS_MAP = {"APPROVED": "A", "REJECTED": "R"}
+
+# Factors to convert each LIMS unit to the SAP base unit for that dimension
+TO_SAP_UNIT = {
+    "g/L": ("G/L", 1.0),
+    "mg/L": ("G/L", 0.001),
+    "mg/mL": ("G/L", 1.0),
+    "ug/mL": ("G/L", 0.001),
+    "%": ("%", 1.0),
+    "CFU/mL": ("CFU/ML", 1.0),
 }
 
-
-def transform_lims_to_sap(lims_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-          Transforms a LIMS event payload into a SAP-compatible inspection result.
-
-          Args:
-        lims_payload: Raw LIMS webhook payload
-
-              Returns:
-        SAP-formatted inspection result dictionary
-
-              Raises:
-        KeyError: If required fields are missing from the payload
-                  ValueError: If status code or unit conversion is unsupported
-                        """
-                        sample_id = lims_payload["sample_id"]
-                        test_result = lims_payload["test_result"]
-                        lims_unit = lims_payload.get("unit", "mg/L")
-                        analyst = lims_payload["analyst_name"]
-                        status = lims_payload["status"].upper()
-                        test_date = lims_payload["test_date"]
-
-                        # Convert status to SAP code
-                        sap_status = STATUS_MAP.get(status)
-                        if not sap_status:
-                            raise ValueError(f"Unsupported LIMS status: {status}")
-
-                        # Convert result to SAP units
-                        sap_result = _convert_units(test_result, lims_unit, "g/L")
-
-                        # Format date to ISO 8601
-                        sap_date = _format_date(test_date)
-
-                        return {
-                            "CHARG": sample_id,
-                            "ERGEBNIS": sap_result,
-                            "ERGEBNISEINHEIT": "G/L",
-                            "PRUEFANWENDER": _lookup_user_id(analyst),
-                            "VERID": sap_status,
-                            "PRUEFDAT": sap_date,
-                            "PRUEFZEIT": datetime.utcnow().strftime("%H%M%S"),
-                  }
+DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S")
 
 
-def _convert_units(value: float, from_unit: str, to_unit: str) -> float:
-    """Converts a measurement value between units."""
-          if from_unit == to_unit:
-              return value
-          factor = UNIT_CONVERSIONS.get((from_unit, to_unit))
-          if factor is None:
-              raise ValueError(f"No conversion defined from {from_unit} to {to_unit}")
-          return round(value * factor, 6)
+class TransformError(ValueError):
+    """Raised when a LIMS event cannot be mapped to SAP."""
 
 
-      def _format_date(date_str: str) -> str:
-    """Normalizes date string to ISO 8601 (YYYYMMDD) for SAP."""
-          for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"):
-              try:
-                  return datetime.strptime(date_str, fmt).strftime("%Y%m%d")
-              except ValueError:
-                  continue
-          raise ValueError(f"Unrecognized date format: {date_str}")
+def transform_lims_to_sap(event: Dict[str, Any]) -> Dict[str, Any]:
+    missing = [f for f in REQUIRED_FIELDS if event.get(f) in (None, "")]
+    if missing:
+        raise TransformError(f"missing required fields: {', '.join(missing)}")
+
+    status = str(event["status"]).upper()
+    if status not in STATUS_MAP:
+        raise TransformError(f"status '{status}' is not final; only APPROVED or REJECTED results are posted")
+
+    unit = event["unit"]
+    if unit not in TO_SAP_UNIT:
+        raise TransformError(f"no SAP unit mapping for '{unit}'")
+    sap_unit, factor = TO_SAP_UNIT[unit]
+
+    try:
+        value = float(event["test_result"])
+    except (TypeError, ValueError):
+        raise TransformError(f"test_result '{event['test_result']}' is not numeric")
+
+    return {
+        "InspectionLot": str(event["inspection_lot"]),
+        "InspectionCharacteristic": str(event["characteristic"]),
+        "Batch": str(event["sample_id"]),
+        "ResultValue": round(value * factor, 6),
+        "ResultUnit": sap_unit,
+        "Valuation": STATUS_MAP[status],
+        "InspectorUser": str(event["analyst_id"]).upper()[:12],
+        "InspectionDate": _format_date(str(event["test_date"])),
+    }
 
 
-      def _lookup_user_id(analyst_name: str) -> str:
-    """Maps analyst full name to SAP user ID (placeholder — replace with DB lookup)."""
-          # TODO: Replace with actual user directory lookup
-                return analyst_name.replace(" ", "_").upper()[:12]
+def _format_date(value: str) -> str:
+    """Return SAP date format YYYYMMDD."""
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y%m%d")
+        except ValueError:
+            continue
+    raise TransformError(f"unrecognized date format: '{value}'")

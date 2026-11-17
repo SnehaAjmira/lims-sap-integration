@@ -1,126 +1,82 @@
-# LIMS-SAP Integration Pipeline
+# LIMS-to-SAP Integration Service
 
-> Event-driven integration between Laboratory Information Management System (LIMS) and SAP ERP using REST APIs and webhooks — built for regulated pharmaceutical and analytical environments.
->
-> ![Python](https://img.shields.io/badge/Python-3.10-blue?logo=python) ![REST API](https://img.shields.io/badge/REST-API-orange) ![SAP ERP](https://img.shields.io/badge/SAP-ERP-blue) ![Status](https://img.shields.io/badge/status-active-green)
->
-> ---
->
-> ## 📌 Project Overview
->
-> This project implements a **real-time, event-driven data pipeline** that synchronizes data between a LIMS platform and SAP ERP. It was designed to eliminate manual data entry, reduce release cycle time by 15%, and ensure DEV-to-PROD validation with zero data loss in compliance with FDA 21 CFR Part 11 and GAMP 5 standards.
->
-> **Key outcomes:**
-> - 0% data loss across DEV → UAT → PROD environments
-> - - 15% reduction in release cycle time
->   - - Full audit trail for regulatory compliance
->    
->     - ---
->
-> ## 🏗️ Architecture
->
-> ```
-> LIMS (Source)
->     │
->     ├── Webhook Event Trigger (sample result, status change)
->     │
->     ▼
-> Event Listener Service (Python/FastAPI)
->     │
->     ├── Data Transformation Layer (mapping specs)
->     │
->     ▼
-> SAP ERP REST API (target system)
->     │
->     └── Validation & Audit Log
-> ```
->
-> ---
->
-> ## 📁 Project Structure
->
-> ```
-> lims-sap-integration/
-> ├── src/
-> │   ├── webhook_listener.py      # Receives LIMS webhook events
-> │   ├── data_transformer.py      # Maps LIMS fields to SAP schema
-> │   ├── sap_api_client.py        # SAP REST API wrapper
-> │   ├── audit_logger.py          # Compliance audit trail logging
-> │   └── config.py                # Environment configuration
-> ├── tests/
-> │   ├── test_transformer.py
-> │   ├── test_sap_client.py
-> │   └── test_webhook.py
-> ├── docs/
-> │   ├── data_mapping_spec.md     # Field mapping documentation
-> │   ├── sop_integration.md       # Standard Operating Procedure
-> │   └── validation_protocol.md  # IQ/OQ/PQ validation plan
-> ├── requirements.txt
-> ├── .env.example
-> └── README.md
-> ```
->
-> ---
->
-> ## 🔧 Tech Stack
->
-> | Layer | Technology |
-> |---|---|
-> | Language | Python 3.10 |
-> | API Framework | FastAPI |
-> | SAP Integration | SAP REST API / RFC |
-> | Auth | OAuth 2.0 / API Keys |
-> | Logging | Python logging + audit trail |
-> | Testing | pytest |
-> | Compliance | FDA 21 CFR Part 11, GAMP 5 |
->
-> ---
->
-> ## 🚀 Getting Started
->
-> ```bash
-> # Clone the repository
-> git clone https://github.com/SnehaAjmira/lims-sap-integration.git
-> cd lims-sap-integration
->
-> # Install dependencies
-> pip install -r requirements.txt
->
-> # Copy and configure environment
-> cp .env.example .env
-> # Edit .env with your LIMS and SAP credentials
->
-> # Run the webhook listener
-> python src/webhook_listener.py
-> ```
->
-> ---
->
-> ## 📋 Data Mapping (Sample)
->
-> | LIMS Field | SAP Field | Transformation |
-> |---|---|---|
-> | `sample_id` | `CHARG` | Direct mapping |
-> | `test_result` | `ERGEBNIS` | Unit conversion |
-> | `analyst_name` | `PRUEFANWENDER` | User ID lookup |
-> | `status` | `VERID` | Status code map |
-> | `test_date` | `PRUEFDAT` | ISO 8601 format |
->
-> ---
->
-> ## ✅ Validation & Compliance
->
-> - **IQ (Installation Qualification):** System setup and configuration verified
-> - - **OQ (Operational Qualification):** Functional testing against SOPs
->   - - **PQ (Performance Qualification):** End-to-end validation in production environment
->     - - Compliant with **FDA 21 CFR Part 11**, **GAMP 5**, **CSA** guidelines
->      
->       - ---
->
-> ## 📄 License
->
-> MIT License — for educational/portfolio purposes.
->
-> ---
->
-> *Built by [Sneha Ajmira](https://linkedin.com/in/contactsnehaajmira) | Product Owner & Business Systems Analyst*
+An event-driven service that receives approved test results from a Laboratory Information Management System (LIMS), maps them to SAP Quality Management inspection results, posts them to SAP, and records every step in a tamper-evident audit log.
+
+| | |
+|---|---|
+| **Domain** | Laboratory systems integration, quality management, regulated (GxP) environments |
+| **Tools** | Python 3, FastAPI, pytest-compatible unittest |
+| **Techniques** | Webhooks, REST, field mapping and unit conversion, hash-chained audit trail, mock-first testing |
+| **Contents** | 5 modules, sample event, 7 passing tests |
+
+---
+
+## 1. Flow
+
+```
+LIMS result approved
+    -> POST /webhook/lims-result        (optional shared-secret header)
+    -> audit: WEBHOOK_RECEIVED
+    -> data_transformer: validate, map, convert units
+         -> on failure: audit TRANSFORM_REJECTED, return 422
+    -> sap_api_client: post inspection result (mock or live)
+         -> on failure: audit SAP_POST_FAILED, return 502
+    -> audit: SAP_POST_SUCCESS, return 200
+```
+
+## 2. Field Mapping
+
+| LIMS field | SAP QM field | Rule |
+|---|---|---|
+| `inspection_lot` | `InspectionLot` | Required |
+| `characteristic` | `InspectionCharacteristic` | Required |
+| `sample_id` | `Batch` | Required |
+| `test_result`, `unit` | `ResultValue`, `ResultUnit` | Converted to SAP base unit (for example mg/L to G/L) |
+| `status` | `Valuation` | APPROVED to A, REJECTED to R. Non-final results are not posted. |
+| `analyst_id` | `InspectorUser` | Upper case, 12 characters max |
+| `test_date` | `InspectionDate` | YYYYMMDD |
+
+## 3. Design Decisions
+
+| Decision | Reason |
+|---|---|
+| Only final results (APPROVED or REJECTED) are posted | Prevents in-progress data from reaching the ERP |
+| Rejections return 422 with a specific reason | LIMS administrators can correct and resend without log digging |
+| Audit entries are hash-chained | Any edit or deletion of an entry is detectable with `verify_chain()` (supports 21 CFR 11.10(e)) |
+| SAP client defaults to mock mode | The full pipeline runs and is testable without SAP access |
+
+## 4. How to Run
+
+```bash
+pip install -r requirements.txt
+
+# Tests
+python -m unittest discover -s tests -v
+
+# Local service (mock SAP)
+uvicorn webhook_listener:app --app-dir src --port 8000
+curl -X POST localhost:8000/webhook/lims-result -H "Content-Type: application/json" -d @examples/sample_event.json
+```
+
+Environment variables (`src/config.py`): `SAP_MODE` (mock or live), `SAP_BASE_URL`, `SAP_API_KEY`, `WEBHOOK_SECRET`, `AUDIT_LOG_PATH`.
+
+## 5. Repository Structure
+
+```
+lims-sap-integration/
+├── src/
+│   ├── webhook_listener.py   # FastAPI endpoints
+│   ├── data_transformer.py   # LIMS to SAP mapping rules
+│   ├── sap_api_client.py     # SAP client (mock and live)
+│   ├── audit_logger.py       # Hash-chained JSONL audit log
+│   └── config.py             # Environment settings
+├── examples/sample_event.json
+├── tests/test_pipeline.py
+└── requirements.txt
+```
+
+## 6. Scope
+
+SAP endpoint paths and field names follow SAP QM conventions but are simplified. A production deployment needs the customer's actual SAP API (OData or RFC), OAuth, retry queueing, and validation under the site's quality system.
+
+Author: [Sneha Ajmira](https://linkedin.com/in/contactsnehaajmira)
